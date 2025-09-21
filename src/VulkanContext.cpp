@@ -1,14 +1,15 @@
 #include "VulkanContext.hpp"
 #include <algorithm>
 #include <array>
-#include <cmath>
 #include <cstring>
 #include <fstream>
 #include <glm/glm.hpp>
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
 #include <vector>
 #include "Frustum.hpp"
+#include "Types.hpp"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
@@ -56,147 +57,6 @@ static std::vector<char> readFile(const std::string& p)
     f.read(d.data(), sz);
     return d;
 }
-
-/* ============================================================
-   Small internal helpers for mipmap generation (no header change)
-   ============================================================ */
-
-static void transitionMipsImmediate(VkDevice device,
-                                    VkCommandPool pool,
-                                    VkQueue queue,
-                                    VkImage img,
-                                    VkImageLayout oldL,
-                                    VkImageLayout newL,
-                                    uint32_t firstMip,
-                                    uint32_t mipCount)
-{
-    VkCommandBufferAllocateInfo a{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
-    a.commandPool = pool;
-    a.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    a.commandBufferCount = 1;
-    VkCommandBuffer cb;
-    vkAllocateCommandBuffers(device, &a, &cb);
-    VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
-    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(cb, &bi);
-
-    VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
-    b.image = img;
-    b.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    b.subresourceRange.baseMipLevel = firstMip;
-    b.subresourceRange.levelCount = mipCount;
-    b.subresourceRange.baseArrayLayer = 0;
-    b.subresourceRange.layerCount = 1;
-    b.oldLayout = oldL;
-    b.newLayout = newL;
-
-    VkPipelineStageFlags srcStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-    VkPipelineStageFlags dstStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-    b.srcAccessMask = 0;
-    b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    if (oldL == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && newL == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
-        srcStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-        dstStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-        b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    }
-    vkCmdPipelineBarrier(cb, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &b);
-
-    vkEndCommandBuffer(cb);
-    VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
-    si.commandBufferCount = 1;
-    si.pCommandBuffers = &cb;
-    vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE);
-    vkQueueWaitIdle(queue);
-    vkFreeCommandBuffers(device, pool, 1, &cb);
-}
-
-static void generateMipmapsImmediate(VkPhysicalDevice phys,
-                                     VkDevice device,
-                                     VkCommandPool pool,
-                                     VkQueue queue,
-                                     VkImage image,
-                                     VkFormat fmt,
-                                     uint32_t texW,
-                                     uint32_t texH,
-                                     uint32_t levels)
-{
-    VkFormatProperties props{};
-    vkGetPhysicalDeviceFormatProperties(phys, fmt, &props);
-    if (!(props.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)) {
-        transitionMipsImmediate(device, pool, queue, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                                0, levels);
-        return;
-    }
-
-    VkCommandBufferAllocateInfo a{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
-    a.commandPool = pool;
-    a.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    a.commandBufferCount = 1;
-    VkCommandBuffer cb;
-    vkAllocateCommandBuffers(device, &a, &cb);
-    VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
-    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(cb, &bi);
-
-    int32_t w = (int32_t)texW, h = (int32_t)texH;
-    for (uint32_t i = 1; i < levels; ++i) {
-        VkImageMemoryBarrier bPrev{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
-        bPrev.image = image;
-        bPrev.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        bPrev.subresourceRange.baseMipLevel = i - 1;
-        bPrev.subresourceRange.levelCount = 1;
-        bPrev.subresourceRange.baseArrayLayer = 0;
-        bPrev.subresourceRange.layerCount = 1;
-        bPrev.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        bPrev.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-        bPrev.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        bPrev.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &bPrev);
-
-        VkImageBlit bl{};
-        bl.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        bl.srcSubresource.mipLevel = i - 1;
-        bl.srcSubresource.baseArrayLayer = 0;
-        bl.srcSubresource.layerCount = 1;
-        bl.srcOffsets[1] = { w, h, 1 };
-        bl.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        bl.dstSubresource.mipLevel = i;
-        bl.dstSubresource.baseArrayLayer = 0;
-        bl.dstSubresource.layerCount = 1;
-        bl.dstOffsets[1] = { std::max(w / 2, 1), std::max(h / 2, 1), 1 };
-        vkCmdBlitImage(cb, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bl,
-                       VK_FILTER_LINEAR);
-
-        w = std::max(w / 2, 1);
-        h = std::max(h / 2, 1);
-    }
-
-    VkImageMemoryBarrier all{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
-    all.image = image;
-    all.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    all.subresourceRange.baseMipLevel = 0;
-    all.subresourceRange.levelCount = levels;
-    all.subresourceRange.baseArrayLayer = 0;
-    all.subresourceRange.layerCount = 1;
-    all.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    all.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    all.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    all.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &all);
-
-    vkEndCommandBuffer(cb);
-    VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
-    si.commandBufferCount = 1;
-    si.pCommandBuffers = &cb;
-    vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE);
-    vkQueueWaitIdle(queue);
-    vkFreeCommandBuffers(device, pool, 1, &cb);
-}
-
-/* ============================================================
-   VulkanContext methods (unchanged signatures)
-   ============================================================ */
 
 uint32_t VulkanContext::findMemType(uint32_t typeBits, VkMemoryPropertyFlags flags)
 {
@@ -427,7 +287,7 @@ void VulkanContext::init(GLFWwindow* win, int, int)
     window = win;
 
     VkApplicationInfo app{ VK_STRUCTURE_TYPE_APPLICATION_INFO };
-    app.pApplicationName = "VoxelEngine";
+    app.pApplicationName = "Voxploria";
     app.apiVersion = VK_API_VERSION_1_2;
 
     uint32_t extCount = 0;
@@ -536,8 +396,6 @@ void VulkanContext::init(GLFWwindow* win, int, int)
     if (vkAllocateDescriptorSets(device, &dsai, &descSet) != VK_SUCCESS)
         throw std::runtime_error("descSet");
 
-    VkPhysicalDeviceProperties props{};
-    vkGetPhysicalDeviceProperties(phys, &props);
     VkSamplerCreateInfo samp{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
     samp.magFilter = VK_FILTER_NEAREST;
     samp.minFilter = VK_FILTER_NEAREST;
@@ -547,8 +405,6 @@ void VulkanContext::init(GLFWwindow* win, int, int)
     samp.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
     samp.minLod = 0.0f;
     samp.maxLod = 0.0f;
-    samp.anisotropyEnable = props.limits.maxSamplerAnisotropy > 1 ? VK_TRUE : VK_FALSE;
-    samp.maxAnisotropy = props.limits.maxSamplerAnisotropy;
     if (vkCreateSampler(device, &samp, nullptr, &sampler) != VK_SUCCESS)
         throw std::runtime_error("sampler");
 
@@ -915,6 +771,7 @@ void VulkanContext::uploadMesh(const Mesh& m)
         }
     }
     gpuChunks.clear();
+    chunkIndex.clear();
 
     VkDeviceSize vsize = sizeof(Vertex) * m.vertices.size();
     VkDeviceSize isize = sizeof(uint32_t) * m.indices.size();
@@ -1050,10 +907,87 @@ void VulkanContext::uploadChunkMeshes(const std::vector<Mesh>& chunks)
         }
     }
     gpuChunks.clear();
+    chunkIndex.clear();
 
     gpuChunks.resize(chunks.size());
     for (size_t i = 0; i < chunks.size(); ++i)
         uploadOne(chunks[i], gpuChunks[i]);
+}
+
+static int64_t packCC(const ChunkCoord& c)
+{
+    return packKey(c);
+}
+
+static void createOrReplace(VulkanContext* self, int64_t key, const Mesh& m, size_t& outIndex)
+{
+    auto it = self->chunkIndex.find(key);
+    if (it == self->chunkIndex.end()) {
+        self->gpuChunks.emplace_back();
+        size_t idx = self->gpuChunks.size() - 1;
+        self->uploadOne(m, self->gpuChunks[idx]);
+        self->gpuChunks[idx].key = key;
+        self->chunkIndex[key] = idx;
+        outIndex = idx;
+    } else {
+        size_t idx = it->second;
+        auto& g = self->gpuChunks[idx];
+        if (g.ibo) {
+            vkDestroyBuffer(self->device, g.ibo, nullptr);
+            g.ibo = {};
+        }
+        if (g.vbo) {
+            vkDestroyBuffer(self->device, g.vbo, nullptr);
+            g.vbo = {};
+        }
+        if (g.iboMem) {
+            vkFreeMemory(self->device, g.iboMem, nullptr);
+            g.iboMem = {};
+        }
+        if (g.vboMem) {
+            vkFreeMemory(self->device, g.vboMem, nullptr);
+            g.vboMem = {};
+        }
+        self->uploadOne(m, g);
+        outIndex = idx;
+    }
+}
+
+void VulkanContext::syncChunks(const std::vector<ChunkCoord>& keepVisible, const std::vector<std::pair<ChunkCoord, Mesh>>& dirty)
+{
+    for (auto& pair : dirty) {
+        const auto& cc = pair.first;
+        const Mesh& m = pair.second;
+        size_t idx = 0;
+        createOrReplace(this, packCC(cc), m, idx);
+    }
+
+    std::unordered_set<int64_t, PackedKeyHash> keep;
+    keep.reserve(keepVisible.size());
+    for (auto& cc : keepVisible)
+        keep.insert(packCC(cc));
+
+    for (int i = int(gpuChunks.size()) - 1; i >= 0; --i) {
+        if (keep.find(gpuChunks[i].key) != keep.end())
+            continue;
+
+        auto& g = gpuChunks[i];
+        if (g.ibo)
+            vkDestroyBuffer(device, g.ibo, nullptr);
+        if (g.vbo)
+            vkDestroyBuffer(device, g.vbo, nullptr);
+        if (g.iboMem)
+            vkFreeMemory(device, g.iboMem, nullptr);
+        if (g.vboMem)
+            vkFreeMemory(device, g.vboMem, nullptr);
+
+        chunkIndex.erase(g.key);
+        if (i != int(gpuChunks.size()) - 1) {
+            gpuChunks[i] = gpuChunks.back();
+            chunkIndex[gpuChunks[i].key] = size_t(i);
+        }
+        gpuChunks.pop_back();
+    }
 }
 
 void VulkanContext::loadAtlasPNG(const char* relPath)
@@ -1089,93 +1023,18 @@ void VulkanContext::loadAtlasPNG(const char* relPath)
         atlasMem = {};
     }
 
-    const VkFormat ATLAS_FMT = VK_FORMAT_R8G8B8A8_SRGB;
-    uint32_t mipLevels = 1u + (uint32_t)std::floor(std::log2((double)std::max(w, h)));
+    createImage((uint32_t)w, (uint32_t)h, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL,
+                VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, atlasImage, atlasMem);
 
-    VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
-    ici.imageType = VK_IMAGE_TYPE_2D;
-    ici.extent = { (uint32_t)w, (uint32_t)h, 1 };
-    ici.mipLevels = mipLevels;
-    ici.arrayLayers = 1;
-    ici.format = ATLAS_FMT;
-    ici.tiling = VK_IMAGE_TILING_OPTIMAL;
-    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    ici.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-    ici.samples = VK_SAMPLE_COUNT_1_BIT;
-    ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    if (vkCreateImage(device, &ici, nullptr, &atlasImage) != VK_SUCCESS)
-        throw std::runtime_error("atlas image");
+    transitionImageLayout(atlasImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    copyBufferToImage(staging, atlasImage, (uint32_t)w, (uint32_t)h);
+    transitionImageLayout(atlasImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
-    VkMemoryRequirements req;
-    vkGetImageMemoryRequirements(device, atlasImage, &req);
-    VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-    mai.allocationSize = req.size;
-    mai.memoryTypeIndex = findMemType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    if (vkAllocateMemory(device, &mai, nullptr, &atlasMem) != VK_SUCCESS)
-        throw std::runtime_error("atlas mem");
-    vkBindImageMemory(device, atlasImage, atlasMem, 0);
-
-    transitionMipsImmediate(device, cmdPool, queue, atlasImage, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
-                            mipLevels);
-
-    VkCommandBufferAllocateInfo a{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
-    a.commandPool = cmdPool;
-    a.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    a.commandBufferCount = 1;
-    VkCommandBuffer cb;
-    vkAllocateCommandBuffers(device, &a, &cb);
-    VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
-    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(cb, &bi);
-    VkBufferImageCopy reg{};
-    reg.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    reg.imageSubresource.mipLevel = 0;
-    reg.imageSubresource.baseArrayLayer = 0;
-    reg.imageSubresource.layerCount = 1;
-    reg.imageExtent = { (uint32_t)w, (uint32_t)h, 1 };
-    vkCmdCopyBufferToImage(cb, staging, atlasImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &reg);
-    vkEndCommandBuffer(cb);
-    VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
-    si.commandBufferCount = 1;
-    si.pCommandBuffers = &cb;
-    vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE);
-    vkQueueWaitIdle(queue);
-    vkFreeCommandBuffers(device, cmdPool, 1, &cb);
-    generateMipmapsImmediate(phys, device, cmdPool, queue, atlasImage, ATLAS_FMT, (uint32_t)w, (uint32_t)h, mipLevels);
     vkDestroyBuffer(device, staging, nullptr);
     vkFreeMemory(device, stagingMem, nullptr);
 
-    VkImageViewCreateInfo iv{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
-    iv.image = atlasImage;
-    iv.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    iv.format = ATLAS_FMT;
-    iv.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    iv.subresourceRange.baseMipLevel = 0;
-    iv.subresourceRange.levelCount = mipLevels;
-    iv.subresourceRange.baseArrayLayer = 0;
-    iv.subresourceRange.layerCount = 1;
-    if (vkCreateImageView(device, &iv, nullptr, &atlasView) != VK_SUCCESS)
-        throw std::runtime_error("atlas view");
-
-    if (sampler) {
-        vkDestroySampler(device, sampler, nullptr);
-        sampler = VK_NULL_HANDLE;
-    }
-    VkPhysicalDeviceProperties props{};
-    vkGetPhysicalDeviceProperties(phys, &props);
-    VkSamplerCreateInfo samp{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
-    samp.magFilter = VK_FILTER_NEAREST;
-    samp.minFilter = VK_FILTER_NEAREST;
-    samp.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-    samp.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    samp.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    samp.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    samp.minLod = 0.0f;
-    samp.maxLod = (float)mipLevels - 1.0f;
-    samp.anisotropyEnable = props.limits.maxSamplerAnisotropy > 1 ? VK_TRUE : VK_FALSE;
-    samp.maxAnisotropy = props.limits.maxSamplerAnisotropy;
-    if (vkCreateSampler(device, &samp, nullptr, &sampler) != VK_SUCCESS)
-        throw std::runtime_error("sampler");
+    atlasView = createImageView(atlasImage, VK_FORMAT_R8G8B8A8_SRGB);
 
     VkDescriptorImageInfo di{ sampler, atlasView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
     VkWriteDescriptorSet wds{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
@@ -1299,6 +1158,7 @@ void VulkanContext::cleanup()
             vkFreeMemory(device, g.vboMem, nullptr);
     }
     gpuChunks.clear();
+    chunkIndex.clear();
 
     if (ibo)
         vkDestroyBuffer(device, ibo, nullptr);

@@ -1,6 +1,5 @@
 #pragma once
 #include <GLFW/glfw3.h>
-#include <vector>
 #include "Physics.hpp"
 #include "Renderer.hpp"
 #include "World.hpp"
@@ -22,7 +21,6 @@ struct App {
 
     uint64_t worldSeed = 1337;
     World world{ worldSeed };
-    std::vector<Mesh> pendingMeshes;
 
     int chunkRadius = 8;
 

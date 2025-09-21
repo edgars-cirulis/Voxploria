@@ -62,8 +62,8 @@ void World::set(int wx, int wy, int wz, Voxel v)
 
 void World::update(const glm::vec3& camPos, int r)
 {
-    int cx = int(floor(camPos.x)) / CHUNK_X;
-    int cz = int(floor(camPos.z)) / CHUNK_Z;
+    int cx = int(std::floor(camPos.x)) / CHUNK_X;
+    int cz = int(std::floor(camPos.z)) / CHUNK_Z;
     for (int dz = -r; dz <= r; ++dz) {
         for (int dx = -r; dx <= r; ++dx) {
             ChunkCoord cc{ cx + dx, cz + dz };
@@ -77,20 +77,24 @@ void World::update(const glm::vec3& camPos, int r)
     }
 }
 
-void World::collectAllMeshes(std::vector<Mesh>& out)
+void World::collectDirtyMeshes(std::vector<std::pair<ChunkCoord, Mesh>>& out)
+{
+    out.clear();
+    for (auto& [cc, ch] : chunks) {
+        if (!ch.dirtyCPU)
+            continue;
+        Mesh m;
+        ChunkMesher::build(ch, *this, m);
+        ch.dirtyCPU = false;
+        ch.dirtyGPU = true;
+        out.emplace_back(cc, std::move(m));
+    }
+}
+
+void World::listLoaded(std::vector<ChunkCoord>& out) const
 {
     out.clear();
     out.reserve(chunks.size());
-    for (auto& [cc, ch] : chunks) {
-        auto mIt = cpuMeshes.find(cc);
-        if (ch.dirtyCPU || mIt == cpuMeshes.end()) {
-            Mesh m;
-            ChunkMesher::build(ch, *this, m);
-            ch.dirtyCPU = false;
-            ch.dirtyGPU = true;
-            cpuMeshes[cc] = std::move(m);
-            mIt = cpuMeshes.find(cc);
-        }
-        out.push_back(mIt->second);
-    }
+    for (auto& kv : chunks)
+        out.push_back(kv.first);
 }

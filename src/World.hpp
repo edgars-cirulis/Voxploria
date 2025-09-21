@@ -20,12 +20,14 @@ struct World {
     bool isSolidFast(int wx, int wy, int wz) const { return getFast(wx, wy, wz) != AIR; }
 
     void update(const glm::vec3& camPos, int radiusChunks);
-    void collectAllMeshes(std::vector<Mesh>& out);
+
+    void collectDirtyMeshes(std::vector<std::pair<ChunkCoord, Mesh>>& out);
+
+    void listLoaded(std::vector<ChunkCoord>& out) const;
 
    private:
     struct ChunkKeyHashLocal {
         size_t operator()(const ChunkCoord& c) const { return (uint64_t(uint32_t(c.cx)) << 32) ^ uint32_t(c.cz); }
     };
     std::unordered_map<ChunkCoord, Chunk, ChunkKeyHashLocal> chunks;
-    std::unordered_map<ChunkCoord, Mesh, ChunkKeyHashLocal> cpuMeshes;
 };

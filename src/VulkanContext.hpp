@@ -3,8 +3,10 @@
 #include <GLFW/glfw3.h>
 #include <glm/glm.hpp>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include "Mesh.hpp"
+#include "Types.hpp"
 
 struct GpuMesh {
     VkBuffer vbo{ VK_NULL_HANDLE };
@@ -14,6 +16,7 @@ struct GpuMesh {
     uint32_t indexCount{ 0 };
     glm::vec3 aabbMin{ 0.0f };
     glm::vec3 aabbMax{ 0.0f };
+    int64_t key{ 0 };
 };
 
 struct VulkanContext {
@@ -64,6 +67,8 @@ struct VulkanContext {
 
     std::vector<GpuMesh> gpuChunks;
 
+    std::unordered_map<int64_t, size_t, PackedKeyHash> chunkIndex;
+
     void init(GLFWwindow* win, int width, int height);
     void cleanup();
 
@@ -75,6 +80,10 @@ struct VulkanContext {
 
     void requestResize() { framebufferResized = true; }
     VkExtent2D getExtent() const { return swapExtent; }
+
+    void syncChunks(const std::vector<ChunkCoord>& keepVisible, const std::vector<std::pair<ChunkCoord, Mesh>>& dirty);
+
+    void uploadOne(const Mesh& m, GpuMesh& out);
 
    private:
     VkPhysicalDeviceMemoryProperties memProps{};
@@ -107,6 +116,4 @@ struct VulkanContext {
     void createSyncObjectsForSwapchain();
 
     void rebuildGraphicsPipeline();
-
-    void uploadOne(const Mesh& m, GpuMesh& out);
 };

@@ -60,11 +60,12 @@ void App::init(GLFWwindow* win, int w, int h)
     renderer.cam.pitch = -20.f;
 
     world.update(player.pos, chunkRadius);
-    world.collectAllMeshes(pendingMeshes);
-    if (!pendingMeshes.empty()) {
-        renderer.vk.uploadChunkMeshes(pendingMeshes);
-        pendingMeshes.clear();
-    }
+
+    std::vector<std::pair<ChunkCoord, Mesh>> dirty;
+    world.collectDirtyMeshes(dirty);
+    std::vector<ChunkCoord> visible;
+    world.listLoaded(visible);
+    renderer.vk.syncChunks(visible, dirty);
 }
 
 void App::onMouse(double x, double y)
@@ -141,7 +142,6 @@ void App::run()
         double now = glfwGetTime();
         float dt = float(now - prev);
         prev = now;
-
         dt = std::min(dt, 0.0333f);
 
         updatePlayer(dt);
@@ -152,11 +152,12 @@ void App::run()
         renderer.cam.pos = player.pos + glm::vec3(0, player.height * 0.4f, 0);
 
         world.update(player.pos, chunkRadius);
-        world.collectAllMeshes(pendingMeshes);
-        if (!pendingMeshes.empty()) {
-            renderer.vk.uploadChunkMeshes(pendingMeshes);
-            pendingMeshes.clear();
-        }
+
+        std::vector<std::pair<ChunkCoord, Mesh>> dirty;
+        world.collectDirtyMeshes(dirty);
+        std::vector<ChunkCoord> visible;
+        world.listLoaded(visible);
+        renderer.vk.syncChunks(visible, dirty);
 
         renderer.draw(dt);
     }

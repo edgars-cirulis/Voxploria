@@ -15,19 +15,16 @@ static inline void pushQuadAO(Mesh& m, glm::vec3 a, glm::vec3 b, glm::vec3 c, gl
   m.vertices.push_back({c, n, {uv1.x, uv1.y}, rect, {ao11, aoStrength, 1}});
   m.vertices.push_back({d, n, {uv0.x, uv1.y}, rect, {ao01, aoStrength, 1}});
 
-  float diag0 = ao00 + ao11; // A + C
-  float diag1 = ao10 + ao01; // B + D
+  float diag0 = ao00 + ao11;
+  float diag1 = ao10 + ao01;
   if (diag0 < diag1) {
-    // indices: A-B-C, A-C-D
     m.indices.insert(m.indices.end(), {base + 0, base + 1, base + 2, base + 0, base + 2, base + 3});
   } else {
-    // flip diagonal: A-B-D, B-C-D
     m.indices.insert(m.indices.end(), {base + 0, base + 1, base + 3, base + 1, base + 2, base + 3});
   }
 }
 
 static inline float aoShade(bool side1, bool side2, bool corner) {
-  // Traditional Minecraft-like AO: darkest if both sides occupied or corner is occupied
   int occ = int(side1) + int(side2);
   if (corner && (side1 || side2)) occ = 3;
   static const float lut[4] = {1.00f, 0.85f, 0.70f, 0.55f};

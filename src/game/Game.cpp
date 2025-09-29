@@ -24,11 +24,18 @@ void Game::bindCallbacks(GLFWwindow* window) {
     if (self) self->renderer.vk.requestResize();
   });
 
-  glfwSetKeyCallback(window, [](GLFWwindow* w, int key, int, int action, int) {
+  glfwSetKeyCallback(window, [](GLFWwindow* w, int key, int, int action, int mods) {
     if (action != GLFW_PRESS) return;
     auto* self = reinterpret_cast<Game*>(glfwGetWindowUserPointer(w));
     if (!self) return;
     if (key == GLFW_KEY_ESCAPE) self->setMouseCaptured(w, !g_mouseCaptured, true);
+    if (key == GLFW_KEY_F && (mods & GLFW_MOD_CONTROL)) {
+      self->freecam = !self->freecam;
+      if (!self->freecam) {
+        self->player.pos.x = self->renderer.cam.pos.x;
+        self->player.pos.z = self->renderer.cam.pos.z;
+      }
+    }
   });
 
   glfwSetCursorPosCallback(window, [](GLFWwindow* w, double x, double y) {
@@ -115,15 +122,43 @@ void Game::updatePlayer(float dt) {
     renderer.cam.fov = std::min(90.f, renderer.cam.fov + 60.f * dt);
 }
 
+void Game::updateFreecam(float dt) {
+  auto& cam = renderer.cam;
+
+  float yawRad = glm::radians(cam.yaw);
+  float pitchRad = glm::radians(cam.pitch);
+  glm::vec3 forward(cosf(pitchRad) * cosf(yawRad), sinf(pitchRad), cosf(pitchRad) * sinf(yawRad));
+  forward = glm::normalize(forward);
+  glm::vec3 right = glm::normalize(glm::cross(forward, glm::vec3(0, 1, 0)));
+  glm::vec3 up(0, 1, 0);
+
+  float speed = freecamSpeed;
+  if (glfwGetKey(renderer.window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS) speed *= freecamFastMultiplier;
+
+  glm::vec3 v(0.0f);
+  if (glfwGetKey(renderer.window, GLFW_KEY_W) == GLFW_PRESS) v += forward;
+  if (glfwGetKey(renderer.window, GLFW_KEY_S) == GLFW_PRESS) v -= forward;
+  if (glfwGetKey(renderer.window, GLFW_KEY_A) == GLFW_PRESS) v -= right;
+  if (glfwGetKey(renderer.window, GLFW_KEY_D) == GLFW_PRESS) v += right;
+  if (glfwGetKey(renderer.window, GLFW_KEY_SPACE) == GLFW_PRESS) v += up;
+  if (glfwGetKey(renderer.window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS) v -= up;
+
+  if (glm::length(v) > 0.0f) v = glm::normalize(v);
+  cam.pos += v * speed * dt;
+}
+
 bool Game::tick(float dt) {
-  updatePlayer(dt);
+  if (freecam) {
+    updateFreecam(dt);
+  } else {
+    updatePlayer(dt);
+    auto solidQuery = [this](int x, int y, int z) { return world.isSolid(x, y, z); };
+    simulate(player, dt, solidQuery, phys);
+    renderer.cam.pos = player.pos + glm::vec3(0, player.height * 0.4f, 0);
+  }
 
-  auto solidQuery = [this](int x, int y, int z) { return world.isSolid(x, y, z); };
-  simulate(player, dt, solidQuery, phys);
-
-  renderer.cam.pos = player.pos + glm::vec3(0, player.height * 0.4f, 0);
-
-  world.update(player.pos, chunkRadius);
+  glm::vec3 anchor = freecam ? renderer.cam.pos : player.pos;
+  world.update(anchor, chunkRadius);
 
   std::vector<std::pair<ChunkCoord, Mesh>> dirty;
   world.collectDirtyMeshes(dirty);

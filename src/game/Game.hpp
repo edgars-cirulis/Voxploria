@@ -22,6 +22,10 @@ private:
   PlayerBody player{};
   PhysParams phys{};
 
+  bool freecam = false;
+  float freecamSpeed = 10.0f;
+  float freecamFastMultiplier = 3.0f;
+
   bool firstMouse = true;
   double lastX = 0.0, lastY = 0.0;
   float mouseSensitivity = 0.12f;
@@ -36,4 +40,5 @@ private:
 
   void onMouse(double x, double y);
   void updatePlayer(float dt);
+  void updateFreecam(float dt);
 };
